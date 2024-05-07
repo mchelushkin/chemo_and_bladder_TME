@@ -1,0 +1,312 @@
+---
+title: Distance analysis in dynamics.
+author: "Maksim Chelushkin"
+date: " `r format(Sys.time(), '%A %B %d, %Y (%H:%M:%S)')` "
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    mode: selfcontained
+    fig_caption: yes
+fontsize: 9pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dpi=100, include = TRUE)
+knitr::opts_knit$set(root.dir = "~/Michiel_projects/chemo_paper/code/")
+library(reticulate)
+library(EnhancedVolcano)
+use_condaenv("base", required = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+```
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib
+import seaborn as sns
+import numpy as np
+from scipy.stats import pearsonr, spearmanr, shapiro
+import os
+from scipy.stats import wilcoxon, ttest_ind, ttest_rel, mannwhitneyu
+from statsmodels.stats.multitest import multipletests
+from glob import glob
+from statannotations.Annotator import Annotator
+#matplotlib.rcParams['figure.dpi'] = 200
+```
+
+```{python}
+tur_cys_palette = {'TUR': 'darkorange', 'Cystectomy': 'deepskyblue'}
+def dyn_comp(u, ax, lin_dens3, title, xlabel, test = 't-test_paired'):
+  sns.boxplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    palette = tur_cys_palette, showfliers=False)
+  sns.stripplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    color='black')
+      
+  sns.lineplot(y=u, x='sample_type', data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.7)
+      
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [('TUR', 'Cystectomy')], data = lin_dens3, x='sample_type', y=u, order=['TUR', 'Cystectomy'])
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH')
+  _, test_results = annotator.apply_test()._get_output()
+  pv = test_results[0].data.pvalue
+  if (test == 'Wilcoxon'):
+    annotator.set_custom_annotations(['Wilcoxon p={:.2g}'.format(pv)])
+  else:
+    annotator.set_custom_annotations(['t-test paired p={:.2g}'.format(pv)])
+  annotator.annotate()
+  
+def dyn_comp_delta(u, ax, lin_dens3, title, xlabel, to_compare, order, test = 't-test_ind'):
+  sns.boxplot(y=u, x=to_compare, data = lin_dens3, ax=ax, order = order,
+                    color = 'mediumseagreen', showfliers=False)
+  sns.stripplot(y=u, x=to_compare, data = lin_dens3, ax=ax, order = order,
+                    color='black')
+      
+  sns.lineplot(y=u, x=to_compare, data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.7)
+      
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [order], data = lin_dens3, x=to_compare, y=u, order=order)
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH')
+  _, test_results = annotator.apply_test()._get_output()
+  pv = test_results[0].data.pvalue
+  if (test == 'Mann-Whitney'):
+    annotator.set_custom_annotations(['Mann-Whitney p={:.2g}'.format(pv)])
+  else:
+    annotator.set_custom_annotations(['t-test p={:.2g}'.format(pv)])
+  annotator.annotate()
+  
+def simple_scatter(x, y, ax, parameter_name, line=False):
+    ax.scatter(x, y)
+    ax.set_title(parameter_name.replace('HALLMARK_','')
+                 + '\nPearson R = {:.2f}, p = {:.1e}'.format(*pearsonr(x,y)) + '\nSpearman R = {:.2f}, p = {:.1e}'.format(*spearmanr(x,y)))
+    loc_min = min(x.min(), y.min())
+    loc_max = max(x.max(), y.max())
+    #return pearsonr(x,y)[0], spearmanr(x,y)[0]
+    if line:
+      ax.plot((loc_min, loc_max), (loc_min, loc_max))
+```
+
+```{python}
+def prepare_volcano(df_tur, df_cys, delog, test = 'wilcoxon'):
+    a_list = []
+    df_tur = df_tur.set_index(df_tur.index.str.replace(' TUR',''))
+    df_cys = df_cys.set_index(df_cys.index.str.replace(' Cystectomy',''))
+    newi = df_tur.index.intersection(df_cys.index)
+    meant = (delog**df_tur.loc[newi]).mean()
+    meanc = (delog**df_cys.loc[newi]).mean()
+    logfc = np.log2(meanc.loc[meant.index].divide(meant))
+    logfc.name = 'log FC'
+    for ph in meant.index:
+        u = df_tur.loc[:, ph]
+        v = df_cys.loc[:, ph]
+        #newi = u.index.intersection(v.index)
+        u = u.loc[newi]
+        v = v.loc[newi]
+        if test == 'wilcoxon':
+            a_list.append(wilcoxon(u, v, nan_policy = 'omit').pvalue)
+        elif test == 'ttest_rel':
+            a_list.append(ttest_rel(u, v, nan_policy = 'omit').pvalue)
+        elif test == 'ttest_ind':
+            a_list.append(ttest_ind(u, v, nan_policy = 'omit').pvalue)
+    pdf = pd.DataFrame({'pvalue': a_list, 'iind': list(meant.index)})
+    dendf = pd.concat([logfc, pdf.set_index('iind')], axis=1).dropna()
+    return dendf.assign(pv_cor = multipletests(dendf.pvalue, method = 'bonferroni')[1])
+```
+
+# Distances
+
+```{python}
+all_med = pd.read_csv('../data/all_median_distances_wo_offset.tsv', sep='\t', index_col=0)
+tur_med = (all_med[all_med.sample_type == 'TUR']).drop(['sample_type', 'pt_number'], axis=1)
+cys_med = (all_med[all_med.sample_type == 'Cystectomy']).drop(['sample_type', 'pt_number'], axis=1)
+```
+
+
+```{python}
+negative_cols1 = [x for x in cys_med.columns if 'negative' in x]
+cys_med = cys_med.drop(negative_cols1, axis=1)
+negative_cols2 = [x for x in tur_med.columns if 'negative' in x]
+tur_med = tur_med.drop(negative_cols2, axis=1)
+```
+
+
+```{python}
+res_med = prepare_volcano(np.log2(tur_med), np.log2(cys_med), 2, test = 'wilcoxon')
+#res_med.index = res_med.index.str.replace('scale', 'median')
+```
+
+
+```{python}
+res_med.index = res_med.reset_index().loc[:, 'index'].str.replace('_', ' ').str.replace(' median', '').str.replace('tumor', 'cancer cell')
+```
+
+
+```{r, fig.width = 8, fig.height = 7}
+buffer_df <- py$res_med
+chosen_xlim <- max(abs(min(buffer_df[['log FC']], na.rm = TRUE)), abs(max(buffer_df[['log FC']], na.rm = TRUE)))
+EnhancedVolcano(buffer_df,
+                lab = rownames(buffer_df),
+                x = 'log FC',
+                y = 'pv_cor',
+                #selectLab = rownames(buffer_df[abs(buffer_df$padj)<0.05, ]),
+                title = '',
+                titleLabSize = 15,
+                subtitle='',
+                subtitleLabSize = 14,
+                ylab = bquote(~-log[10] ~ '(adjusted p-value)'),
+                xlab = 'Log2 Fold change: TUR-BT (left) vs cystectomy (right)',
+                axisLabSize = 16,
+                ylim = c(0, max(max(-log10(buffer_df[['pv_cor']]), na.rm = TRUE), -log10(0.1)) + 0.3),
+                xlim = c(-chosen_xlim - 0.3, chosen_xlim + 0.3),
+                pCutoff = 0.05,
+                FCcutoff = 0,
+                pointSize = 3.0,
+                labSize=5.0,
+                legendPosition = 'none',
+                widthConnectors = 0.35,
+                arrowheads = F,
+                drawConnectors=TRUE,
+                boxedLabels = FALSE,
+                caption = '',
+                max.overlaps = 30
+)
+```
+
+# Correlation
+
+```{python}
+df_tur1 = tur_med.set_index(tur_med.index.str.replace(' TUR',''))
+df_cys1 = cys_med.set_index(cys_med.index.str.replace(' Cystectomy',''))
+newi = df_tur1.index.intersection(df_cys1.index)
+newc = df_tur1.columns.intersection(df_cys1.columns)
+logfc = np.log2(df_cys1.loc[newi, newc].divide(df_tur1.loc[newi, newc]))
+logfc_s =  logfc.loc[:, ['tumor_to_CD8_Tcell_median', 'CD8_Tcell_to_tumor_median', 'Macrophage_to_tumor_median']]
+
+cell_perc = (10**pd.read_csv('../data/combined_norm_log10_density.tsv', sep='\t', index_col=0).drop(['sample_type', 'pt_number'], axis=1))*100
+tur_perc = cell_perc[cell_perc.index.str.contains('TUR')]
+cys_perc = cell_perc[cell_perc.index.str.contains('Cystectomy')]
+perc_tur1 = tur_perc.set_index(tur_perc.index.str.replace(' TUR',''))
+perc_cys1 = cys_perc.set_index(cys_perc.index.str.replace(' Cystectomy',''))
+logfc_perc = np.log2(perc_cys1.loc[newi].divide(perc_tur1.loc[newi]))
+df_fc = pd.concat([logfc_s, logfc_perc], axis=1).drop('85')
+```
+
+```{python, fig.width = 8, fig.height = 7}
+plt.close()
+fig, ax = plt.subplots(1,1, figsize = (8, 7))
+g = sns.regplot(x = 'CD8_Tcells', y='CD8_Tcell_to_tumor_median', data=df_fc, color=".3", line_kws=dict(color="r"), ax=ax)
+g.text(s='Pearson R = {:.2f}\np = {:.1g}'.format(*pearsonr(df_fc.CD8_Tcells, df_fc.CD8_Tcell_to_tumor_median)), x=2, y=1.7, fontsize=16)
+g.set_xlabel('Log2 FC in CD8 T cell percentage', fontsize=16)
+g.set_ylabel('Log2 FC in the median distance\nfrom CD8 T cell to 1-NN cancer cell', fontsize=16)
+plt.show()
+```
+```{python, fig.width = 8, fig.height = 7}
+plt.close()
+fig, ax = plt.subplots(1,1, figsize = (8, 7))
+g = sns.regplot(x = 'CD8_Tcells', y='tumor_to_CD8_Tcell_median', data=df_fc, color=".3", line_kws=dict(color="r"), ax=ax)
+g.text(s='Pearson R = {:.2f}\np = {:.1g}'.format(*pearsonr(df_fc.CD8_Tcells, df_fc.tumor_to_CD8_Tcell_median)), x=2, y=1.7, fontsize=16)
+g.set_xlabel('Log2 FC in CD8 T cell percentage', fontsize=16)
+g.set_ylabel('Log2 FC in the median distance\nfrom cancer cell to 1-NN CD8 T cell', fontsize=16)
+plt.show()
+```
+
+# Densities
+
+```{python}
+dens_to_comp = ['B_cells', 'CD4_Tcells', 'Macrophages', 'Tregs', 'CD8_Tcells', 'PanCK+_cells']
+norm_log_dens = pd.read_csv('../data/combined_norm_log10_density.tsv', sep='\t', index_col=0)
+volc_norm_dens = prepare_volcano(norm_log_dens.loc[norm_log_dens.index.str.contains('TUR'), dens_to_comp], norm_log_dens.loc[norm_log_dens.index.str.contains('Cystectomy'), dens_to_comp], test = 'wilcoxon', delog = 10)
+volc_norm_dens.index = volc_norm_dens.reset_index().loc[:, 'index'].str.replace('_', ' ').str.replace('PanCK+', 'Cancer', regex=False)
+```
+
+```{python}
+diff_dens = norm_log_dens.set_index('pt_number').loc[norm_log_dens.index.str.contains('Cystectomy'), dens_to_comp] - norm_log_dens.set_index('pt_number').loc[norm_log_dens.index.str.contains('TUR'), dens_to_comp]
+```
+
+
+```{r, fig.width = 5, fig.height = 7}
+library(EnhancedVolcano)
+buffer_df <- py$volc_norm_dens
+chosen_xlim <- max(abs(min(buffer_df[['log FC']], na.rm = TRUE)), abs(max(buffer_df[['log FC']], na.rm = TRUE)))
+EnhancedVolcano(buffer_df,
+                lab = rownames(buffer_df),
+                x = 'log FC',
+                y = 'pv_cor',
+                #selectLab = rownames(buffer_df[abs(buffer_df$pv_cor)<0.05, ]),
+                title = '',
+                titleLabSize = 15,
+                subtitle='',
+                subtitleLabSize = 14,
+                ylab = bquote(~-log[10] ~ '(adjusted p-value)'),
+                xlab = 'Log2 Fold change:\nTUR-BT (left) vs cystectomy (right)', 
+                axisLabSize = 16,
+                ylim = c(0, max(max(-log10(buffer_df[['pv_cor']]), na.rm = TRUE), -log10(0.1)) + 0.3), #ylim = c(0, 2.5),
+                xlim = c(-chosen_xlim - 0.3, chosen_xlim + 0.3), #c(-1.5, 1.5),
+                pCutoff = 0.05,
+                FCcutoff = 0,
+                pointSize = 3.0,
+                labSize=5.0,
+                legendPosition = 'none',
+                widthConnectors = 0.35,
+                arrowheads = F,
+                drawConnectors=TRUE,
+                boxedLabels = FALSE,
+                caption = ''
+)
+```
+# Deseq2
+
+```{r}
+fr <- readRDS('../data/diffexpression_fgsea_res.rds')
+```
+
+```{python}
+low_cov = ['HALLMARK_COAGULATION', 'HALLMARK_KRAS_SIGNALING_DN', 'HALLMARK_PANCREAS_BETA_CELLS', 'HALLMARK_SPERMATOGENESIS']
+fgs = r.fr.set_index('pathway').drop(low_cov)
+fgs = fgs.assign(pv_cor = multipletests(fgs.pval, method = 'bonferroni')[1]).rename(index = lambda x: x.replace('HALLMARK_', ''))
+```
+
+```{r, fig.width = 11, fig.height = 7}
+buffer_df <- py$fgs
+chosen_xlim <- max(abs(min(buffer_df[['NES']], na.rm = TRUE)), abs(max(buffer_df[['NES']], na.rm = TRUE)))
+EnhancedVolcano(buffer_df,
+                lab = rownames(buffer_df),
+                x = 'NES',
+                y = 'pv_cor',
+                #selectLab = rownames(buffer_df[abs(buffer_df$padj)<0.05, ]),
+                title = '',
+                titleLabSize = 15,
+                subtitle='',
+                subtitleLabSize = 14,
+                ylab = bquote(~-log[10] ~ '(adjusted p-value)'),
+                xlab = bquote('Normalized enrichment score:\nTUR-BT (left) vs cystectomy (right)'),
+                axisLabSize = 16,
+                ylim = c(0, 35),#c(0, max(max(-log10(buffer_df[['pv_cor']]), na.rm = TRUE), -log10(0.1)) + 0.3),
+                xlim = c(-chosen_xlim - 0.3, chosen_xlim + 0.3),
+                pCutoff = 0.05,
+                FCcutoff = 0,
+                pointSize = 2.0,
+                labSize=4.0,
+                legendPosition = 'none',
+                widthConnectors = 0.35,
+                arrowheads = F,
+                drawConnectors=TRUE,
+                boxedLabels = FALSE,
+                caption = '',
+                max.overlaps = 30
+)
+```
+
+

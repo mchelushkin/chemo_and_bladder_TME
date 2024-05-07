@@ -1,0 +1,529 @@
+---
+title: Comparing post- and pre-chemo samples.
+author: "Maksim Chelushkin"
+date: " `r format(Sys.time(), '%A %B %d, %Y (%H:%M:%S)')` "
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    mode: selfcontained
+    fig_caption: yes
+fontsize: 9pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dpi=100, include = TRUE)
+knitr::opts_knit$set(root.dir = "~/Michiel_projects/chemo_paper/code/")
+library(reticulate)
+use_condaenv("base", required = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(nparLD)
+library(PMCMRplus)
+library(WRS2)
+```
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib
+import seaborn as sns
+import numpy as np
+from scipy.stats import pearsonr, spearmanr
+import os
+import gseapy as gp
+from gseapy.parser import gsea_gmt_parser
+from scipy.stats import wilcoxon, ttest_ind, ttest_rel
+from statsmodels.stats.multitest import multipletests
+from glob import glob
+from statannotations.Annotator import Annotator
+plt.rcParams.update({'font.size': 14})
+```
+
+```{python}
+annot = pd.read_csv('../data/batches12_chemo_regimen_annotation.tsv', sep='\t', index_col=0)
+annot['Primary Study ID'] = annot.loc[:, 'Primary Study ID'].astype(str)
+pt_reg = annot.set_index('Primary Study ID').loc[:, 'chemo_regimen'].to_dict()
+platinum_type_dict = annot.set_index('Primary Study ID').loc[:, 'platinum_type'].to_dict()
+```
+
+```{python}
+presp_list = ['partial_response' if (u in ['31', '32', '33', '34', '62', '67', '83']) else 'non_responder' for u in annot.loc[:, 'Primary Study ID']]
+presp_dict = pd.Series(presp_list, index = annot.loc[:, 'Primary Study ID']).to_dict()
+```
+
+
+```{python}
+def dyn_comp(u, ax, lin_dens3, log_dens3, title, xlabel, test='t-test_paired', test_name = 't-test paired', size=3, format_simple = True):
+  sns.boxplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    palette = tur_cys_palette, showfliers=False)
+  sns.stripplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    color='black', size=size)
+      
+  sns.lineplot(y=u, x='sample_type', data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.35, color = 'grey')
+  ax.set_yscale("log")
+  if format_simple:
+    ax.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [('TUR', 'Cystectomy')], data = log_dens3, x='sample_type', y=u, order=['TUR', 'Cystectomy'])
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH')
+  _, test_results = annotator.apply_test()._get_output()
+  pv = test_results[0].data.pvalue
+  annotator.set_custom_annotations(['{} p={:.2g}\nN = {}'.format(test_name, pv, len(log_dens3.index))])
+  annotator.annotate()
+  print(u, 'Median TUR = {:.4g}'.format(lin_dens3[lin_dens3.sample_type == 'TUR'].loc[:, u].median()),
+  '\nMedian Cystectomy = {:.4g}'.format(lin_dens3[lin_dens3.sample_type == 'Cystectomy'].loc[:, u].median()))
+  
+def dyn_comp_lin(u, ax, lin_dens3, title, xlabel, test='t-test_paired', test_name = 't-test paired', size=3):
+  sns.boxplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    palette = tur_cys_palette, showfliers=False)
+  sns.stripplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    color='black', size=size)
+      
+  sns.lineplot(y=u, x='sample_type', data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.35, color = 'grey')
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [('TUR', 'Cystectomy')], data = lin_dens3, x='sample_type', y=u, order=['TUR', 'Cystectomy'])
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH')
+  _, test_results = annotator.apply_test()._get_output()
+  pv = test_results[0].data.pvalue
+  annotator.set_custom_annotations(['{} p={:.2g}\nN = {}'.format(test_name, pv, len(lin_dens3.index))])
+  annotator.annotate()
+  print(u, 'Median TUR = {:.4g}'.format(lin_dens3[lin_dens3.sample_type == 'TUR'].loc[:, u].median()),
+  '\nMedian Cystectomy = {:.4g}'.format(lin_dens3[lin_dens3.sample_type == 'Cystectomy'].loc[:, u].median()))
+  
+def dyn_comp_delta(u, ax, lin_dens3, title, xlabel, to_compare, order, test = 't-test_paired', size=3, ofs = 1):
+  sns.boxplot(y=u, x=to_compare, data = lin_dens3, ax=ax, order = order,
+                    color = 'mediumseagreen', showfliers=False)
+  sns.swarmplot(y=u, x=to_compare, data = lin_dens3, ax=ax, order = order,
+                    color='black', size=size)
+      
+  sns.lineplot(y=u, x=to_compare, data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.7)
+      
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [order], data = lin_dens3, x=to_compare, y=u, order=order)
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH', line_offset = ofs, line_offset_to_group = ofs)
+  _, test_results = annotator.apply_test()._get_output()
+  pv = test_results[0].data.pvalue
+  annotator.set_custom_annotations(['{} p={:.2g}'.format(test, pv)])
+  annotator.annotate(line_offset = ofs, line_offset_to_group = ofs)
+```
+
+# Figure 2
+```{python}
+norm_log_dens = pd.read_csv('../data/combined_norm_log10_density.tsv', sep='\t', index_col=0)
+norm_log_dens_tumor = pd.read_csv('../data/tumor_norm_log10_density.tsv', sep='\t', index_col=0)
+norm_log_dens_stroma = pd.read_csv('../data/stroma_norm_log10_density.tsv', sep='\t', index_col=0)
+raw_dens = pd.read_csv('../data/all_densities_combined_kde_mm2.tsv', sep='\t', index_col=0)
+dens_to_comp = ['B_cells', 'CD4_Tcells', 'Macrophages', 'Tregs', 'CD8_Tcells', 'PanCK+_cells', 'Negative_cells']
+```
+
+
+```{python, fig.width = 5, fig.height = 5}
+def transform_dens(norm_log_dens, addition = 0):
+  norm_log_dens = norm_log_dens.loc[:, dens_to_comp] + addition
+  lin_dens2 = (10**norm_log_dens).assign(sample_type = norm_log_dens.index.str.split(' ').str[1]).assign(pt_number = norm_log_dens.index.str.split(' ').str[0])
+  lin_dens3 = lin_dens2[lin_dens2.pt_number.isin(lin_dens2.pt_number.value_counts()[lin_dens2.pt_number.value_counts() == 2].index)].sort_values(['pt_number', 'sample_type'], ascending=False)
+  lin_dens3 = lin_dens3.assign(chemo_regimen = lin_dens3.pt_number.map(pt_reg)).assign(platinum_type = lin_dens3.pt_number.map(platinum_type_dict)).assign(response = lin_dens3.pt_number.map(presp_dict))
+  log_dens2 = norm_log_dens.assign(sample_type = norm_log_dens.index.str.split(' ').str[1]).assign(pt_number = norm_log_dens.index.str.split(' ').str[0])
+  log_dens3 = log_dens2[log_dens2.pt_number.isin(log_dens2.pt_number.value_counts()[log_dens2.pt_number.value_counts() == 2].index)].sort_values(['pt_number', 'sample_type'], ascending=False)
+  log_dens3 = log_dens3.assign(chemo_regimen = log_dens3.pt_number.map(pt_reg)).assign(platinum_type = log_dens3.pt_number.map(platinum_type_dict)).assign(response = log_dens3.pt_number.map(presp_dict))
+  return lin_dens3, log_dens3
+lin_dens3, log_dens3 = transform_dens(norm_log_dens, addition = 2)
+raw_lin_dens3, raw_log_dens3 = transform_dens(raw_dens)
+lin_dens3_tumor, log_dens3_tumor = transform_dens(norm_log_dens_tumor, addition = 2)
+lin_dens3_stroma, log_dens3_stroma = transform_dens(norm_log_dens_stroma, addition = 2)
+```
+
+
+```{python}
+pdl1 = pd.read_csv('../data/Prepost NAC patients overview PD-L1.csv', sep=';', index_col=0)
+pdl1_cys = pdl1.loc[~pdl1.index.isna(), ['Material.1', 'CPS (%).1', 'IC (%).1', 'TC (%).1']].dropna()
+pdl1_tur = pdl1.loc[~pdl1.index.isna(), ['Material', 'CPS (%)', 'IC (%)', 'TC (%)']].dropna().replace('76,5', '76.5')
+pdl1_tur.index = pdl1_tur.index.astype(int).astype(str) + ' TUR'
+pdl1_cys.index = pdl1_cys.index.astype(int).astype(str) + ' Cystectomy'
+pdl1_cys.columns = ['Material', 'CPS (%)', 'IC (%)', 'TC (%)']
+pdl1_tur = pdl1_tur.drop('Material', axis=1).astype(float)+1
+pdl1_cys = pdl1_cys.drop('Material', axis=1).astype(float)+1
+pdl1_df = pd.concat([pdl1_tur.assign(sample_type = 'TUR'), pdl1_cys.assign(sample_type = 'Cystectomy')])
+pdl1_df_log = pd.concat([np.log10(pdl1_tur).assign(sample_type = 'TUR'), np.log10(pdl1_cys).assign(sample_type = 'Cystectomy')])
+```
+
+```{python, fig.width = 15, fig.height = 5}
+pdl1_df2 = pdl1_df.assign(pt_number = pdl1_df.index.str.split(' ').str[0])
+pdl1_df3 = pdl1_df2[pdl1_df2.pt_number.isin(pdl1_df2.pt_number.value_counts()[pdl1_df2.pt_number.value_counts() == 2].index)].sort_values(['pt_number', 'sample_type'], ascending=False)
+pdl1_df3 = pdl1_df3.assign(platinum_type = pdl1_df3.pt_number.map(platinum_type_dict)).assign(chemo_regimen = pdl1_df3.pt_number.map(pt_reg)).assign(response = pdl1_df3.pt_number.map(presp_dict))
+
+pdl1_df2_log = pdl1_df_log.assign(pt_number = pdl1_df_log.index.str.split(' ').str[0])
+pdl1_df3_log = pdl1_df2_log[pdl1_df2_log.pt_number.isin(pdl1_df2_log.pt_number.value_counts()[pdl1_df2_log.pt_number.value_counts() == 2].index)].sort_values(['pt_number', 'sample_type'], ascending=False)
+pdl1_df3_log = pdl1_df3_log.assign(platinum_type = pdl1_df3_log.pt_number.map(platinum_type_dict)).assign(chemo_regimen = pdl1_df3_log.pt_number.map(pt_reg)).assign(response = pdl1_df3_log.pt_number.map(presp_dict))
+```
+
+
+```{python}
+ssgsea = pd.read_csv('../data/ssgsea_scores_Fig2.tsv', sep='\t', index_col=0)
+ssgsea = ssgsea.reset_index().assign(sample_type = ssgsea.reset_index().loc[:, 'index'].apply(lambda x: x.split(' ')[1])).assign(pt_number = ssgsea.reset_index().loc[:, 'index'].apply(lambda x: x.split(' ')[0])).set_index('index')
+ps_ssgsea0 = ssgsea[ssgsea.pt_number.isin(ssgsea.pt_number.value_counts()[ssgsea.pt_number.value_counts() == 2].index)].sort_values(by = ['pt_number', 'sample_type'], ascending=False)
+ps_ssgsea0 = ps_ssgsea0.assign(chemo_regimen = ps_ssgsea0.pt_number.map(pt_reg)).assign(platinum_type = ps_ssgsea0.pt_number.map(platinum_type_dict)).assign(response = ps_ssgsea0.pt_number.map(presp_dict))
+```
+
+```{python, fig.width = 16.5, fig.height = 16.5}
+tur_cys_palette = {'TUR': 'lightcoral', 'Cystectomy': 'lightskyblue'}
+```
+
+
+```{python}
+cys_den = log_dens3[log_dens3.sample_type == 'Cystectomy'].set_index('pt_number')
+tur_den = log_dens3[log_dens3.sample_type == 'TUR'].set_index('pt_number')
+common_in = cys_den.index.intersection(tur_den.index)
+delta_den = cys_den.loc[common_in].drop(['sample_type', 'chemo_regimen', 'platinum_type', 'response'], axis=1) - tur_den.loc[common_in].drop(['sample_type', 'chemo_regimen', 'platinum_type', 'response'], axis=1)
+delta_den = delta_den.assign(pt_number = delta_den.index)
+delta_den = delta_den.assign(chemo_regimen = delta_den.pt_number.map(pt_reg)).assign(platinum_type = delta_den.pt_number.map(platinum_type_dict)).assign(response = delta_den.pt_number.map(presp_dict))
+```
+
+```{python}
+cys_ps= ps_ssgsea0[ps_ssgsea0.sample_type == 'Cystectomy'].set_index('pt_number')
+tur_ps= ps_ssgsea0[ps_ssgsea0.sample_type == 'TUR'].set_index('pt_number')
+common_in = cys_ps.index.intersection(tur_ps.index)
+delta_ps = cys_ps.loc[common_in].drop(['sample_type', 'chemo_regimen', 'platinum_type', 'response'], axis=1) - tur_ps.loc[common_in].drop(['sample_type', 'chemo_regimen', 'platinum_type', 'response'], axis=1)
+delta_ps = delta_ps.assign(pt_number = delta_ps.index)
+delta_ps = delta_ps.assign(chemo_regimen = delta_ps.pt_number.map(pt_reg)).assign(platinum_type = delta_ps.pt_number.map(platinum_type_dict)).assign(response = delta_ps.pt_number.map(presp_dict))
+```
+
+
+```{python}
+all_med = pd.read_csv('../data/all_median_distances_wo_offset.tsv', sep='\t', index_col=0)
+all_med_log = np.log10(all_med.drop(['sample_type', 'pt_number'], axis=1)).assign(sample_type = all_med.index.str.split(' ').str[1]).assign(pt_number = all_med.index.str.split(' ').str[0])
+all_med_lin = all_med.drop(['sample_type'], axis=1).assign(sample_type = all_med.index.str.split(' ').str[1]).assign(pt_number = all_med.index.str.split(' ').str[0])
+all_med_log = all_med_log[all_med_log.pt_number.isin(all_med_log.pt_number.value_counts()[all_med_log.pt_number.value_counts() == 2].index)].sort_values(['pt_number', 'sample_type'], ascending=False).assign(chemo_regimen = all_med_log.pt_number.map(pt_reg)).assign(platinum_type =all_med_log.pt_number.map(platinum_type_dict)).assign(response =all_med_log.pt_number.map(presp_dict))
+all_med_lin = all_med_lin[all_med_lin.pt_number.isin(all_med_lin.pt_number.value_counts()[all_med_lin.pt_number.value_counts() == 2].index)].sort_values(['pt_number', 'sample_type'], ascending=False).assign(chemo_regimen = all_med_lin.pt_number.map(pt_reg)).assign(platinum_type = all_med_lin.pt_number.map(platinum_type_dict)).assign(response = all_med_lin.pt_number.map(presp_dict))
+```
+
+
+```{python}
+tur_dist2 = (all_med_log[all_med_log.sample_type == 'TUR']).set_index('pt_number')
+cys_dist2 = (all_med_log[all_med_log.sample_type == 'Cystectomy']).set_index('pt_number')
+common_index0 = tur_dist2.index.intersection(cys_dist2.index)
+delta_dist0 = cys_dist2.loc[common_index0, ['CD8_Tcell_to_tumor_median', 'Macrophage_to_tumor_median']] - tur_dist2.loc[common_index0, ['CD8_Tcell_to_tumor_median', 'Macrophage_to_tumor_median']]
+delta_dist0 = delta_dist0.assign(pt_number = delta_dist0.index.str.split(' ').str[0])
+delta_dist0 = delta_dist0.assign(chemo_regimen = delta_dist0.pt_number.map(pt_reg)).assign(platinum_type = delta_dist0.pt_number.map(platinum_type_dict)).assign(response = delta_dist0.pt_number.map(presp_dict)).dropna(subset = ['chemo_regimen'])
+```
+
+
+```{python}
+pdl1_df3_log = pdl1_df3_log.rename(columns = {'IC (%)': 'IC', 'CPS (%)': 'CPS', 'TC (%)': 'TC'}).dropna()
+pdl1_df3 = pdl1_df3.rename(columns = {'IC (%)': 'IC', 'CPS (%)': 'CPS', 'TC (%)': 'TC'}).dropna()
+```
+```{python}
+cys_pdl = pdl1_df3_log[pdl1_df3_log.sample_type == 'Cystectomy'].set_index('pt_number')
+tur_pdl = pdl1_df3_log[pdl1_df3_log.sample_type == 'TUR'].set_index('pt_number')
+common_in = cys_pdl.index.intersection(tur_pdl.index)
+delta_pdl = cys_pdl.loc[common_in].drop(['sample_type', 'chemo_regimen', 'platinum_type', 'response'], axis=1) - tur_pdl.loc[common_in].drop(['sample_type', 'chemo_regimen', 'platinum_type', 'response'], axis=1)
+delta_pdl = delta_pdl.assign(pt_number = delta_pdl.index)
+delta_pdl = delta_pdl.assign(chemo_regimen = delta_pdl.pt_number.map(pt_reg)).assign(platinum_type = delta_pdl.pt_number.map(platinum_type_dict)).assign(response = delta_pdl.pt_number.map(presp_dict))
+```
+
+```{python}
+def dyn_comp_anova(u, ax, lin_dens3, log_dens3, title, xlabel, loc_leg, test='t-test_paired', test_name='t-test paired'):
+  sns.boxplot(y=u, x = 'response', hue='sample_type', data = lin_dens3, ax=ax, hue_order = ['TUR', 'Cystectomy'], order = ['non_responder', 'partial_response'],
+                    palette = tur_cys_palette, showfliers=False)
+  sns.stripplot(y=u, x = 'response', hue='sample_type', data = lin_dens3, ax=ax, hue_order = ['TUR', 'Cystectomy'], order = ['non_responder', 'partial_response'],
+                    color='black', dodge=True, size=3)
+      
+  #sns.lineplot(y=u, x='chemo_regimen', hue='sample_type', data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.5, color = 'grey')
+  ax.set_yscale("log")    
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [(('non_responder', 'TUR'), ('non_responder', 'Cystectomy')), (('partial_response', 'TUR'), ('partial_response', 'Cystectomy'))], data = log_dens3, x='response', hue = 'sample_type', y=u, hue_order = ['TUR', 'Cystectomy'], order = ['non_responder', 'partial_response'])
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH')
+  _, test_results = annotator.apply_test()._get_output()
+  #pv = test_results[0].data.pvalue
+  annotator.set_custom_annotations(['{} p={:.3g}'.format(test_name, test_results[0].data.pvalue), '{} p={:.3g}'.format(test_name, test_results[1].data.pvalue)])
+  annotator.annotate()
+  handles, labels = ax.get_legend_handles_labels()
+  ax.legend(handles[0:2], ['TUR-BT', 'Cystectomy'], loc=loc_leg)
+  
+def dyn_comp_lin_anova(u, ax, lin_dens3, title, xlabel, loc_leg, test='t-test_paired', test_name='t-test paired'):
+  sns.boxplot(y=u, x = 'chemo_regimen', hue='sample_type', data = lin_dens3, ax=ax, hue_order = ['TUR', 'Cystectomy'], order = ['MVAC', 'gemcitabine_platinum'],
+                    palette = tur_cys_palette, showfliers=False)
+  sns.stripplot(y=u, x = 'chemo_regimen', hue='sample_type', data = lin_dens3, ax=ax, hue_order = ['TUR', 'Cystectomy'], order = ['MVAC', 'gemcitabine_platinum'],
+                    color='black', dodge=True, size=3)
+      
+  #sns.lineplot(y=u, hue='chemo_regimen', x='sample_type', data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.5, color = 'grey')
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [(('MVAC', 'TUR'), ('MVAC', 'Cystectomy')), (('gemcitabine_platinum', 'TUR'), ('gemcitabine_platinum', 'Cystectomy'))], data = lin_dens3, x='chemo_regimen', hue = 'sample_type', y=u, hue_order = ['TUR', 'Cystectomy'], order = ['MVAC', 'gemcitabine_platinum'])
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH')
+  _, test_results = annotator.apply_test()._get_output()
+  #pv = test_results[0].data.pvalue
+  annotator.set_custom_annotations(['{} p={:.2g}'.format(test_name, test_results[0].data.pvalue), '{} paired p={:.2g}'.format(test_name, test_results[1].data.pvalue)])
+  annotator.annotate()
+  handles, labels = ax.get_legend_handles_labels()
+  ax.legend(handles[0:2], ['TUR-BT', 'Cystectomy'], loc=loc_leg)
+```
+
+
+```{python, fig.width = 14.5, fig.height = 12.5}
+plt.rcParams.update({'font.size': 15})
+testt = 'Wilcoxon'
+testt_name = 'Wilcoxon'
+plt.close()
+fig, axs = plt.subplots(2, 2, figsize = (14.5, 12.5), width_ratios = [10, 5])
+af = axs.flat
+u = 'CD8_Tcell_to_tumor_median'
+dyn_comp_anova(u, af[0], all_med_lin, all_med_log, '', 'CD8 T cell to 1-NN cancer cell\nmedian distance, um', loc_leg=(0.6, 0.7), test='Wilcoxon', test_name = 'Wilcoxon')
+dyn_comp_delta(u, af[1], delta_dist0, '', 'Δ log10(CD8 T cell to 1-NN cancer cell\nmedian distance) upon treatment', to_compare = 'response', order = ('non_responder', 'partial_response'), test = 'Mann-Whitney', ofs = 0, size=5)
+af[0].set_xticklabels(['non-response', 'partial response'])
+af[1].set_xticklabels(['non-response', 'partial response'])
+#af[1].set_xlim((-0.7,1.7))
+#af[1].set_ylim((-1.4,2.8))
+af[0].set_yticks([10, 50, 100], ['10','50', '100'])
+u = 'Macrophage_to_tumor_median'
+dyn_comp_anova(u, af[2], all_med_lin, all_med_log, '', 'Macrophage to 1-NN cancer cell\nmedian distance, um', loc_leg=(0.6, 0.7), test='Wilcoxon', test_name = 'Wilcoxon')
+dyn_comp_delta(u, af[3], delta_dist0, '', 'Δ log10(Macrophage to 1-NN cancer cell\nmedian distance) upon treatment', to_compare = 'response', order = ('non_responder', 'partial_response'), test = 'Mann-Whitney', ofs = 0, size=5)
+af[2].set_xticklabels(['non-response', 'partial response'])
+af[3].set_xticklabels(['non-response', 'partial response'])
+af[2].set_yticks([10, 50, 100], ['10','50', '100'])
+#_ = fig.set_tight_layout(True)
+plt.subplots_adjust(hspace=0.3, wspace=0.28)
+plt.show()
+```
+
+# Mixed ANOVA models
+## densities
+```{python}
+lin_dens3_cr = lin_dens3[lin_dens3.response.isin(['non_responder', 'partial_response'])]
+log_dens3_cr = log_dens3[log_dens3.response.isin(['non_responder', 'partial_response'])]
+```
+
+### CD8 T cells
+```{r}
+py$log_dens3_cr %>%
+  group_by(sample_type, response) %>%
+  shapiro_test(CD8_Tcells)
+```
+
+```{r}
+py$log_dens3_cr %>%
+  group_by(sample_type) %>%
+  levene_test(CD8_Tcells ~ response)
+```
+
+```{r}
+#box_m(py$log_dens3_cr[, "CD8_Tcells", drop = FALSE], py$log_dens3_cr$chemo_regimen)
+```
+
+
+```{r}
+res.aov <- anova_test(
+  data = py$log_dens3_cr, dv = CD8_Tcells, wid = pt_number,
+  between = response, within = sample_type
+  )
+get_anova_table(res.aov)
+```
+```{r}
+bwtrim(CD8_Tcells ~ response*sample_type, id = pt_number, data = py$log_dens3_cr)
+```
+
+
+### Macrophages
+```{r}
+py$log_dens3_cr %>%
+  group_by(sample_type, response) %>%
+  shapiro_test(Macrophages)
+```
+
+
+```{r}
+py$log_dens3_cr %>%
+  group_by(sample_type) %>%
+  levene_test(Macrophages ~ response)
+```
+```{r}
+#box_m(py$log_dens3_cr[, "Macrophages", drop = FALSE], py$log_dens3_cr$chemo_regimen)
+```
+```{r}
+bwtrim(Macrophages ~ response*sample_type, id = pt_number, data = py$log_dens3_cr)
+```
+
+```{r}
+res.aov <- anova_test(
+  data = py$log_dens3_cr, dv = Macrophages, wid = pt_number,
+  between = response, within = sample_type
+  )
+get_anova_table(res.aov)
+```
+
+```{r}
+f1.ld.f1(y = py$log_dens3_cr$Macrophages, time = py$log_dens3_cr$sample_type, group = py$log_dens3_cr$response, subject = py$log_dens3_cr$pt_number, time.order = c('TUR', 'Cystectomy'), group.order = c('non_responder', 'partial_response'), description=F)$ANOVA.test
+```
+
+## TGFb signature
+```{python}
+ps_ssgsea_cr = ps_ssgsea0[ps_ssgsea0.response.isin(['non_responder', 'partial_response'])]
+```
+
+```{r}
+py$ps_ssgsea_cr %>%
+  group_by(sample_type, response) %>%
+  shapiro_test(TGFB_Mariathasan)
+```
+
+```{r}
+py$ps_ssgsea_cr %>%
+  group_by(sample_type) %>%
+  levene_test(TGFB_Mariathasan ~ response)
+```
+
+
+```{r}
+#box_m(py$ps_ssgsea_cr[, "TGFB_Mariathasan", drop = FALSE], py$ps_ssgsea_cr$chemo_regimen)
+```
+
+```{r}
+res.aov <- anova_test(
+  data = py$ps_ssgsea_cr, dv = TGFB_Mariathasan, wid = pt_number,
+  between = response, within = sample_type
+  )
+get_anova_table(res.aov)
+```
+
+```{r}
+tgf_df = bwtrim(TGFB_Mariathasan ~ response*sample_type, id = pt_number, data = py$ps_ssgsea_cr)
+```
+
+```{r}
+f1.ld.f1(y = py$ps_ssgsea_cr$TGFB_Mariathasan, time = py$ps_ssgsea_cr$sample_type, group = py$ps_ssgsea_cr$response, subject = py$ps_ssgsea_cr$pt_number, time.order = c('TUR', 'Cystectomy'), group.order = c('non_responder', 'partial_response'), description=F)$ANOVA.test
+```
+
+## PDL1 score
+
+```{python}
+pdl_cr = pdl1_df3_log[pdl1_df3_log.response.isin(['non_responder', 'partial_response'])]
+```
+```{r}
+py$pdl_cr %>%
+  group_by(sample_type, response) %>%
+  shapiro_test(IC)
+```
+
+
+```{r}
+py$pdl_cr %>%
+  group_by(sample_type) %>%
+  levene_test(IC ~ response)
+```
+```{r}
+#box_m(py$pdl_cr[, "IC", drop = FALSE], py$pdl_cr$chemo_regimen)
+```
+```{r}
+bwtrim(IC ~ response*sample_type, id = pt_number, data = py$pdl_cr)
+```
+
+```{r}
+f1.ld.f1(y = py$pdl_cr$IC, time = py$pdl_cr$sample_type, group = py$pdl_cr$response, subject = py$pdl_cr$pt_number, time.order = c('TUR', 'Cystectomy'), group.order = c('non_responder', 'partial_response'), description=F)$ANOVA.test
+```
+
+
+```{r}
+res.aov <- anova_test(
+  data = py$pdl_cr, dv = IC, wid = pt_number,
+  between = response, within = sample_type
+  )
+get_anova_table(res.aov)
+```
+
+```{python}
+cys_den = pdl1_df3_log[pdl1_df3_log.sample_type == 'Cystectomy'].set_index('pt_number')
+tur_den = pdl1_df3_log[pdl1_df3_log.sample_type == 'TUR'].set_index('pt_number')
+common_in = cys_den.index.intersection(tur_den.index)
+delta_den = cys_den.loc[common_in].drop(['sample_type', 'chemo_regimen', 'platinum_type', 'response'], axis=1) - tur_den.loc[common_in].drop(['sample_type', 'chemo_regimen', 'platinum_type', 'response'], axis=1)
+delta_den = delta_den.assign(pt_number = delta_den.index)
+delta_den = delta_den.assign(chemo_regimen = delta_den.pt_number.map(pt_reg)).assign(platinum_type = delta_den.pt_number.map(platinum_type_dict)).assign(response = delta_den.pt_number.map(presp_dict))
+```
+
+
+## distances
+```{python}
+log_dist3_cr = all_med_log[all_med_log.response.isin(['non_responder', 'partial_response'])]
+```
+
+```{r}
+py$log_dist3_cr %>%
+  group_by(sample_type, response) %>%
+  shapiro_test(CD8_Tcell_to_tumor_median)
+```
+
+
+```{r}
+py$log_dist3_cr %>%
+  group_by(sample_type) %>%
+  levene_test(CD8_Tcell_to_tumor_median ~ response)
+```
+```{r}
+#box_m(py$log_dist3_cr[, "CD8_Tcell_to_tumor_median", drop = FALSE], py$log_dist3_cr$chemo_regimen)
+```
+```{r}
+f1.ld.f1(y = py$log_dist3_cr$CD8_Tcell_to_tumor_median, time = py$log_dist3_cr$sample_type, group = py$log_dist3_cr$response, subject = py$log_dist3_cr$pt_number, time.order = c('TUR', 'Cystectomy'), group.order = c('non_responder', 'partial_response'), description=F)$ANOVA.test
+```
+
+
+```{r}
+res.aov <- anova_test(
+  data = py$log_dist3_cr, dv = CD8_Tcell_to_tumor_median, wid = pt_number,
+  between = response, within = sample_type
+  )
+get_anova_table(res.aov)
+```
+```{r}
+bwtrim(CD8_Tcell_to_tumor_median ~ response*sample_type, id = pt_number, data = py$log_dist3_cr)
+```
+
+```{r}
+py$log_dist3_cr %>%
+  group_by(sample_type, response) %>%
+  shapiro_test(Macrophage_to_tumor_median)
+```
+
+
+```{r}
+py$log_dist3_cr %>%
+  group_by(sample_type) %>%
+  levene_test(Macrophage_to_tumor_median ~ response)
+```
+```{r}
+#box_m(py$log_dist3_cr[, "Macrophage_to_tumor_median", drop = FALSE], py$log_dist3_cr$chemo_regimen)
+```
+```{r}
+f1.ld.f1(y = py$log_dist3_cr$Macrophage_to_tumor_median, time = py$log_dist3_cr$sample_type, group = py$log_dist3_cr$response, subject = py$log_dist3_cr$pt_number, time.order = c('TUR', 'Cystectomy'), group.order = c('non_responder', 'partial_response'), description=F)$ANOVA.test
+```
+
+
+```{r}
+res.aov <- anova_test(
+  data = py$log_dist3_cr, dv = Macrophage_to_tumor_median, wid = pt_number,
+  between = response, within = sample_type
+  )
+get_anova_table(res.aov)
+```
+```{r}
+bwtrim(Macrophage_to_tumor_median ~ response*sample_type, id = pt_number, data = py$log_dist3_cr)
+```
+
