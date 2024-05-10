@@ -129,6 +129,7 @@ def prepare_volcano(df_tur, df_cys, delog, test = 'wilcoxon'):
 
 ```{python}
 all_med = pd.read_csv('../data/all_median_distances_wo_offset.tsv', sep='\t', index_col=0)
+all_med.columns = all_med.columns.str.replace('CD4_Tcell', 'T_helper')
 tur_med = (all_med[all_med.sample_type == 'TUR']).drop(['sample_type', 'pt_number'], axis=1)
 cys_med = (all_med[all_med.sample_type == 'Cystectomy']).drop(['sample_type', 'pt_number'], axis=1)
 ```

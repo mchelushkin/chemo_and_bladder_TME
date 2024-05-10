@@ -1,0 +1,105 @@
+---
+title: Checking density and distance biases.
+author: "Maksim Chelushkin"
+date: " `r format(Sys.time(), '%A %B %d, %Y (%H:%M:%S)')` "
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    mode: selfcontained
+    fig_caption: yes
+fontsize: 9pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dpi=100, include = TRUE)
+knitr::opts_knit$set(root.dir = "~/Michiel_projects/chemo_paper/code/")
+library(reticulate)
+use_condaenv("base", required = TRUE)
+```
+
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib
+import seaborn as sns
+import numpy as np
+from scipy.stats import pearsonr, spearmanr
+import os
+#import decoupler as dc
+import gseapy as gp
+from gseapy.parser import gsea_gmt_parser
+from scipy.stats import wilcoxon, ttest_ind, ttest_rel
+from statsmodels.stats.multitest import multipletests
+from glob import glob
+from statannotations.Annotator import Annotator
+plt.rcParams.update({'font.size': 14})
+```
+
+```{python}
+tur_cys_palette = {'TUR': 'lightcoral', 'Cystectomy': 'lightskyblue'}
+def dyn_comp(u, ax, lin_dens3, log_dens3, title, xlabel, test='t-test_paired'):
+  sns.boxplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    palette = tur_cys_palette, showfliers=False)
+  sns.stripplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    color='black', size=3)
+      
+  sns.lineplot(y=u, x='sample_type', data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.35, color = 'grey')
+  ax.set_yscale("log")    
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [('TUR', 'Cystectomy')], data = log_dens3, x='sample_type', y=u, order=['TUR', 'Cystectomy'])
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH')
+  _, test_results = annotator.apply_test()._get_output()
+  pv = test_results[0].data.pvalue
+  annotator.set_custom_annotations(['t-test paired p={:.2g}'.format(pv)])
+  annotator.annotate()
+  
+  
+def dyn_comp_lin(u, ax, lin_dens3, title, xlabel, test='t-test_paired'):
+  sns.boxplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    palette = tur_cys_palette, showfliers=False)
+  sns.stripplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    color='black', size=3)
+      
+  sns.lineplot(y=u, x='sample_type', data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.35, color = 'grey')
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [('TUR', 'Cystectomy')], data = lin_dens3, x='sample_type', y=u, order=['TUR', 'Cystectomy'])
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH')
+  _, test_results = annotator.apply_test()._get_output()
+  pv = test_results[0].data.pvalue
+  annotator.set_custom_annotations(['t-test paired p={:.2g}'.format(pv)])
+  annotator.annotate()
+```
+
+```{python}
+log_dens = pd.read_csv('../data/all_densities_combined_kde_mm2.tsv', sep='\t', index_col=0).loc[: , ['Total', 'pt_number', 'sample_type']]
+log_dens = log_dens[log_dens.pt_number.isin(log_dens.pt_number.value_counts()[log_dens.pt_number.value_counts() == 2].index)].sort_values(['pt_number', 'sample_type'], ascending=False)
+lin_dens = pd.concat([10**(log_dens.loc[:, ['Total']]), log_dens.loc[:, ['pt_number', 'sample_type']]], axis=1)
+```
+
+```{python}
+lin_dist = pd.read_csv('../data/median_distances_no_cell_types.tsv', sep='\t', index_col=0)
+```
+
+
+```{python, fig.width = 10, fig.height = 4.5}
+plt.close()
+fig, axs = plt.subplots(1, 2, figsize = (10, 4.5))
+af = axs.flat
+dyn_comp('Total', af[0], lin_dens,  log_dens, '', 'Total cell density, cells/mm2')
+dyn_comp_lin('all_cells_to_all_cells_median', af[1], lin_dist, '', 'Median 1-NN distance\nregardless of cell type, um')
+af[0].set_yticks([3000, 4000, 6000, 10000], ['3000','4000','6000', '10000'])
+af[0].set_xticks(['TUR', 'Cystectomy'], ['TUR-BT', 'Cystectomy'])
+af[1].set_xticks(['TUR', 'Cystectomy'], ['TUR-BT', 'Cystectomy'])
+plt.subplots_adjust(hspace=0.2, wspace=0.4)
+plt.show()
+```
+

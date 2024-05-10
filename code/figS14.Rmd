@@ -1,0 +1,88 @@
+---
+title: NAC-untreated patients. PD-L1 IHC.
+author: "Maksim Chelushkin"
+date: " `r format(Sys.time(), '%A %B %d, %Y (%H:%M:%S)')` "
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    mode: selfcontained
+    fig_caption: yes
+fontsize: 9pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dpi=100, include = TRUE)
+knitr::opts_knit$set(root.dir = "~/Michiel_projects/chemo_paper/code/")
+library(reticulate)
+use_condaenv("base", required = TRUE)
+```
+
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib
+import seaborn as sns
+import numpy as np
+from scipy.stats import wilcoxon, ttest_ind, ttest_rel, chi2_contingency, fisher_exact
+from statsmodels.stats.multitest import multipletests
+from glob import glob
+from statannotations.Annotator import Annotator
+plt.rcParams.update({'font.size': 14})
+```
+
+```{python}
+tur_cys_palette = {'TUR': 'lightcoral', 'Cystectomy': 'lightskyblue'}
+nac_palette = {'untreated': 'lightcoral', 'NAC-treated': 'lightskyblue'}
+  
+def dyn_comp(u, ax, lin_dens3, log_dens3, title, xlabel, test='t-test_paired', test_name = 't-test paired', size=3, format_simple = True):
+  sns.boxplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    palette = tur_cys_palette, showfliers=False)
+  sns.stripplot(y=u, x='sample_type', data = lin_dens3, ax=ax, order = ['TUR', 'Cystectomy'],
+                    color='black', size=size)
+      
+  sns.lineplot(y=u, x='sample_type', data = lin_dens3, ax=ax, units = 'pt_number', estimator=None, linewidth=0.35, color = 'grey')
+  ax.set_yscale("log")
+  if format_simple:
+    ax.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
+  ax.set_xlabel('')
+  ax.set_ylabel(xlabel)
+  ax.set_title(title)
+  
+  annotator = Annotator(ax, pairs = [('TUR', 'Cystectomy')], data = log_dens3, x='sample_type', y=u, order=['TUR', 'Cystectomy'])
+  annotator.configure(test=test, text_format = 'simple', comparisons_correction='BH')
+  _, test_results = annotator.apply_test()._get_output()
+  pv = test_results[0].data.pvalue
+  annotator.set_custom_annotations(['{} p={:.2g}'.format(test_name, pv)])
+  annotator.annotate()
+```
+
+```{python}
+df_pdl1 = pd.read_csv('../data/pdl1_NACuntreated.tsv', sep='\t', index_col=0)
+```
+
+```{python}
+df_pdl1['IC'] = df_pdl1['IC'] + 1
+df_pdl1['TC'] = df_pdl1['TC'] + 1
+df_pdl1_log = df_pdl1.copy()
+df_pdl1_log['IC'] = np.log10(df_pdl1_log['IC'])
+df_pdl1_log['TC'] = np.log10(df_pdl1_log['TC'])
+```
+
+```{python, fig.width = 10, fig.height = 4.5}
+plt.close()
+fig, axs = plt.subplots(1, 2, figsize = (10, 4.5))
+af = axs.flat
+u = 'IC'
+dyn_comp(u, af[0], df_pdl1, df_pdl1_log, '', 'IC (%) PDL1 score', test='Wilcoxon', test_name = 'Wilcoxon')
+_ = af[0].set_xticks(['TUR', 'Cystectomy'], ['TUR-BT', 'Cystectomy'])
+u = 'TC'
+dyn_comp(u, af[1], df_pdl1, df_pdl1_log,'', 'TC (%) PDL1 score', test='Wilcoxon', test_name = 'Wilcoxon')
+_ = af[1].set_xticks(['TUR', 'Cystectomy'], ['TUR-BT', 'Cystectomy'])
+
+plt.subplots_adjust(hspace=0.2, wspace=0.4)
+plt.show()
+```
+
